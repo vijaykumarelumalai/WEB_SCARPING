@@ -1,0 +1,172 @@
+import streamlit as st
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+import pandas as pd
+import mysql.connector
+import time
+
+# Configure Streamlit page
+st.set_page_config(page_title="Redbus Route Data Scraper", layout="wide")
+
+# Establish the MySQL connection
+def get_db_connection():
+    return mysql.connector.connect(
+        host="127.0.0.1",       # Typically "localhost" or "127.0.0.1" for local MySQL server
+        user="root",            # Your MySQL username
+        password="1234",        # Your MySQL password
+        database="redbus"       # Your database name
+    )
+
+# Function to store data in MySQL
+def store_data_in_mysql(data, source, destination, date):
+    try:
+        mydb = get_db_connection()
+        cursor = mydb.cursor()
+        for entry in data:
+            cursor.execute(
+                """
+                INSERT INTO bus_routes (source, destination, date, bus_name, departure_time, arrival_time, duration, price)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    source,
+                    destination,
+                    date,
+                    entry['bus_name'],
+                    entry['departure_time'],
+                    entry['arrival_time'],
+                    entry['duration'],
+                    entry['price']
+                )
+            )
+        mydb.commit()
+        cursor.close()
+        mydb.close()
+        st.success("Data successfully stored in MySQL database.")
+    except mysql.connector.Error as err:
+        st.error(f"Error: {err}")
+
+# Function to scrape Redbus data
+def scrape_redbus_data(source, destination, date):
+    # Configure Chrome options
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")  # Run Chrome in headless mode
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    
+    # Path to ChromeDriver
+    chrome_driver_path = 'C:/webdrivers/chromedriver.exe'  # Update this path
+    
+    # Initialize WebDriver
+    service = Service(executable_path=chrome_driver_path)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Navigate to Redbus
+    driver.get("https://www.redbus.in/")
+    
+    try:
+        # Input source
+        source_input = driver.find_element(By.ID, "src")
+        source_input.clear()
+        source_input.send_keys(source)
+        time.sleep(2)  # Wait for autocomplete suggestions
+        source_input.send_keys("\n")  # Select the first suggestion
+        
+        # Input destination
+        dest_input = driver.find_element(By.ID, "dest")
+        dest_input.clear()
+        dest_input.send_keys(destination)
+        time.sleep(2)  # Wait for autocomplete suggestions
+        dest_input.send_keys("\n")  # Select the first suggestion
+        
+        # Input date
+        date_input = driver.find_element(By.ID, "onward_cal")
+        date_input.click()
+        # Select the date from the calendar
+        date_str = date.strftime("%d %b %Y")
+        date_element = driver.find_element(By.XPATH, f"//td[@class='wd day' and text()='{date.day}']")
+        date_element.click()
+        
+        # Click search button
+        search_button = driver.find_element(By.ID, "search_btn")
+        search_button.click()
+        
+        # Wait for results to load
+        time.sleep(5)
+        
+        # Scroll down to load all results
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+        
+        # Get page source and parse with BeautifulSoup
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        # Extract bus details
+        buses = soup.find_all('div', class_='bus-item')  # Update this selector based on actual Redbus HTML structure
+        
+        data = []
+        for bus in buses:
+            try:
+                bus_name = bus.find('div', class_='travels').text.strip()
+                departure_time = bus.find('div', class_='dp-time').text.strip()
+                arrival_time = bus.find('div', class_='bp-time').text.strip()
+                duration = bus.find('div', class_='dur').text.strip()
+                price = bus.find('div', class_='fare').text.strip().replace('₹', '').replace(',', '')
+                
+                data.append({
+                    'bus_name': bus_name,
+                    'departure_time': departure_time,
+                    'arrival_time': arrival_time,
+                    'duration': duration,
+                    'price': float(price)
+                })
+            except AttributeError:
+                # Skip if any attribute is missing
+                continue
+        
+        # Close the WebDriver
+        driver.quit()
+        
+        return data
+    except Exception as e:
+        driver.quit()
+        st.error(f"An error occurred during scraping: {e}")
+        return []
+
+# Streamlit App
+def main():
+    st.title("🚌 Redbus Route Data Scraper")
+    st.markdown("Enter your travel details to scrape bus routes from Redbus.")
+    
+    # Input fields
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        source = st.text_input("**Source**", "Bangalore")
+    
+    with col2:
+        destination = st.text_input("**Destination**", "Chennai")
+    
+    with col3:
+        date = st.date_input("**Date**")
+    
+    if st.button("**Search**"):
+        if not source or not destination or not date:
+            st.warning("Please fill in all fields.")
+        else:
+            with st.spinner("Scraping data..."):
+                data = scrape_redbus_data(source, destination, date)
+            
+            if data:
+                df = pd.DataFrame(data)
+                st.success(f"Found {len(df)} bus routes.")
+                st.dataframe(df)
+                store_data_in_mysql(data, source, destination, date)
+            else:
+                st.warning("No data found.")
+
+if __name__ == "__main__":
+    main()
